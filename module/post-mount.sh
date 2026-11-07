@@ -26,6 +26,7 @@ exec >>"$MODDIR/apply.log" 2>&1
 echo "NoEmulator redirects $(date -u) uptime=$(cut -d' ' -f1 /proc/uptime)"
 
 SUSFS_REDIRECT_NODE=/proc/susfs_open_redirect
+SUSFS_UNAME_MACHINE_NODE=/proc/susfs_uname_machine
 
 # stat is called as toybox explicitly. At this stage the shell resolves `stat` to
 # busybox, whose stat has no %C: it printed the literal letter 'C', chcon rejected
@@ -33,8 +34,16 @@ SUSFS_REDIRECT_NODE=/proc/susfs_open_redirect
 # qemu_device. Every non-su process then got EACCES and the boot never finished.
 NOEMULATOR_STAT=/system/bin/toybox
 
+# One rule line to the susfs node. Fails when the node refuses it, which is how a
+# build without a flag answers.
+noemulator_redirect_write() {
+    echo "$1" > "$SUSFS_REDIRECT_NODE" 2>/dev/null
+}
+
 # Redirect opens of one path to another, creating the replacement first if the
-# target is a device node.
+# target is a device node. The optional fourth argument is the generator's flag
+# string: any of 'app_only', 'any_label' and 'keep_ident', never
+# 'needs_native_bridge'.
 #
 # Why a replacement rather than hiding: an app's own /proc/self/fd and
 # /proc/self/maps name the goldfish nodes, and a detector greps those for
@@ -51,6 +60,18 @@ noemulator_redirect() {
     redirect_target="$1"
     redirect_replacement="$2"
     redirect_scheme="$3"
+    redirect_flags="${4:-}"
+
+    redirect_app_only=0
+    redirect_any_label=0
+    redirect_keep_ident=0
+    for redirect_flag in $redirect_flags; do
+        case "$redirect_flag" in
+            app_only) redirect_app_only=1 ;;
+            any_label) redirect_any_label=1 ;;
+            keep_ident) redirect_keep_ident=1 ;;
+        esac
+    done
 
     if [ ! -e "$redirect_target" ]; then
         echo "redirect: no target $redirect_target; skipped"
@@ -66,7 +87,12 @@ noemulator_redirect() {
         return 0
     fi
 
-    noemulator_labels_match "$redirect_target" "$redirect_replacement" || return 0
+    # any_label is for the one replacement whose label is deliberately different:
+    # linker64's arm64 copy is system_file, not system_linker_exec. The owner
+    # accepted that mismatch; every other rule still has to match.
+    if [ "$redirect_any_label" -eq 0 ]; then
+        noemulator_labels_match "$redirect_target" "$redirect_replacement" || return 0
+    fi
 
     # The node's verb is 'add_open_redirect', not 'add' as susfs_path uses
     # (susfs4ksu-lkm-x64 PROC_INTERFACES.en.md:107). A bare 'add' is refused.
@@ -77,8 +103,39 @@ noemulator_redirect() {
     # without the flag refuses the five-word line and registers nothing, so the
     # rule is written again without it, and the app must then have "Umount
     # modules" off (ADR 0014).
-    if echo "add_open_redirect $redirect_target $redirect_replacement $redirect_scheme no_reverse" \
-        > "$SUSFS_REDIRECT_NODE" 2>/dev/null; then
+    #
+    # 'app_only' keeps the rule to the app process, so a program the app execs
+    # (getprop) still opens the x86_64 libc. It is a newer kernel flag; without it
+    # the write is refused and the rule is skipped, never written without the flag
+    # (docs/adr/0026-elf-headers-redirect-to-their-arm64-copies.md).
+    redirect_line="add_open_redirect $redirect_target $redirect_replacement $redirect_scheme no_reverse"
+    if [ "$redirect_app_only" -eq 1 ]; then
+        redirect_line="$redirect_line app_only"
+    fi
+
+    # 'keep_ident' makes an fd the rule served report the target's st_dev, st_ino
+    # and /proc/self/fd link, so a detector comparing the opened file with the path
+    # sees one file (ADR 0033). It is the newest flag; a build without it refuses
+    # the line, and the rule is then written as it was before the flag existed.
+    redirect_written=0
+    if [ "$redirect_keep_ident" -eq 1 ]; then
+        if noemulator_redirect_write "$redirect_line keep_ident"; then
+            redirect_written=1
+        else
+            echo "redirect: susfs has no keep_ident; $redirect_target is written without it"
+        fi
+    fi
+
+    # The success line below keeps one format whatever the flags: the WebUI status
+    # counts applied redirects by it (lib/options_webui.sh).
+    if [ "$redirect_written" -eq 1 ]; then
+        :
+    elif [ "$redirect_app_only" -eq 1 ]; then
+        if ! noemulator_redirect_write "$redirect_line"; then
+            echo "redirect: susfs has no app_only; $redirect_target skipped"
+            return 0
+        fi
+    elif noemulator_redirect_write "$redirect_line"; then
         :
     elif echo "add_open_redirect $redirect_target $redirect_replacement $redirect_scheme" \
         > "$SUSFS_REDIRECT_NODE"; then
@@ -149,6 +206,38 @@ noemulator_clone_device_node() {
     return 0
 }
 
+# Spoof uname()'s machine for the arm64 processes, and for no others.
+#
+# susfs matches the marker against the process's own maps, so 'set aarch64
+# /system/bin/arm64/linker64' moves uname for exactly the translated arm64 apps:
+# the guest linker is what makes an app translated, and no x86_64 process maps it.
+# x86_64 apps, root and adb shell keep the kernel's answer.
+#
+# A marker that does not exist means no arm64 app can start either, so both an
+# absent node and an absent marker skip rather than write, as every other failure
+# path here does.
+noemulator_uname_machine() {
+    uname_machine_name="$1"
+    uname_machine_marker="$2"
+
+    if [ ! -e "$SUSFS_UNAME_MACHINE_NODE" ]; then
+        echo "uname machine: susfs has no uname_machine node; skipped"
+        return 0
+    fi
+    if [ ! -e "$uname_machine_marker" ]; then
+        echo "uname machine: no $uname_machine_marker; skipped"
+        return 0
+    fi
+
+    # The node reads back 'machine=<value> marker=... spoofed=<n>', which is the
+    # line the next reader of the log needs.
+    if ! echo "set $uname_machine_name $uname_machine_marker" > "$SUSFS_UNAME_MACHINE_NODE" 2>/dev/null; then
+        echo "uname machine: set refused"
+        return 0
+    fi
+    echo "uname machine: $(cat "$SUSFS_UNAME_MACHINE_NODE" 2>/dev/null)"
+}
+
 . "$MODDIR/lib/user_config.sh"
 RULES="$(sh "$MODDIR/lib/generate_rules.sh" "$MODDIR/artifacts.conf" "$NOEMULATOR_USER_CONFIG")" || {
     echo "artifacts.conf or the user config is invalid; nothing applied"
@@ -184,10 +273,32 @@ noemulator_late_deletions() {
 }
 noemulator_late_deletions &
 
+# The uname machine spoof is written here, before the open-redirect guard and not
+# behind it. It needs neither the redirect node nor the overlay, and a kernel with
+# one susfs feature and not the other must not lose the spoof with the redirects.
+# It lands before zygote, so the first arm64 app already starts under it.
+echo "$RULES" | grep '^noemulator_uname_machine ' | while IFS= read -r rule; do
+    eval "$rule" || echo "failed: $rule"
+done
+
 if [ ! -e "$SUSFS_REDIRECT_NODE" ]; then
     echo "susfs open-redirect node absent; no redirects applied"
     exit 1
 fi
+
+# The app property view goes here, after the guard above and before the generic
+# redirects. It cannot run at post-fs-data: the copies are frozen, and every
+# module's post-fs-data property writes must land first. KernelSU runs each
+# module's post-fs-data.sh in directory order, unsorted, so another module may
+# write a property after this one's. post-mount is still before zygote starts,
+# which is what the kernel side needs
+# (docs/adr/0029-app-property-view-by-area-swap.md).
+echo "$RULES" | grep '^noemulator_app_delprop ' > "$MODDIR/app_property_view.rules"
+if [ -s "$MODDIR/app_property_view.rules" ]; then
+    . "$MODDIR/lib/app_property_view.sh"
+    noemulator_app_property_view "$MODDIR/app_property_view.rules"
+fi
+rm -f "$MODDIR/app_property_view.rules"
 
 echo "$RULES" | grep '^noemulator_redirect ' | while IFS= read -r rule; do
     eval "$rule" || echo "failed: $rule"

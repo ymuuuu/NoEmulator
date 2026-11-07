@@ -2,8 +2,11 @@
 # Hand off the state that outlives the module.
 #
 # Everything else NoEmulator does dies with it. The susfs rules live in the
-# kernel and are gone at the next boot; the cloned device nodes are in tmpfs;
-# the staged libraries are inside the module tree; the property edits are
+# kernel and are gone at the next boot; the cloned device nodes and the app
+# property view's copies (/dev/.prop_view) are in tmpfs, and ksud prunes a
+# removed module before any module's stage script runs, so the boot that runs
+# this never builds the copies again (KernelSU-Next userspace/ksud/src/
+# init_event.rs:71, module.rs:427); the staged libraries are inside the module tree; the property edits are
 # applied per boot and are not persisted anywhere. Acceptance criterion 11 was
 # measured passing on all of that.
 #

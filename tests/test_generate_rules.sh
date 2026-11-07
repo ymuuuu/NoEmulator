@@ -59,12 +59,27 @@ config_with() {
 
 # --- one line per directive -------------------------------------------------
 
-# The verb is the node's ('add'), not the CLI's ('add_sus_path'). This assertion
-# originally encoded the CLI spelling, passed, and the write failed with EINVAL on
-# the device. Verified against the real node before being corrected.
-check 'hide emits the node-syntax add write' \
-    "echo 'add /dev/goldfish_sync' > /proc/susfs_path" \
+check 'hide emits a call to the post-fs-data helper' \
+    "noemulator_hide '/dev/goldfish_sync'" \
     "$(sh "$GENERATE" "$(config_with 'hide /dev/goldfish_sync')")"
+
+# The helper is run here with the node swapped for a file. The verb is the node's
+# ('add'), not the CLI's ('add_sus_path'): an assertion that once encoded the CLI
+# spelling passed, and the write failed with EINVAL on the device.
+eval "$(sed -n '/^noemulator_hide()/,/^}/p' "$REPO/module/post-fs-data.sh" \
+    | sed "s|/proc/susfs_path|$WORK/susfs_path|")"
+: > "$WORK/hidden_file"
+check 'the hide helper writes the node-syntax add for a path that exists' \
+    "add $WORK/hidden_file" \
+    "$(: > "$WORK/susfs_path"; noemulator_hide "$WORK/hidden_file"; cat "$WORK/susfs_path")"
+
+# Another image may not ship every file the config names. The node refuses a path
+# that does not exist, and a refused write is a failed rule that makes health read
+# not working, for a file there was nothing to hide.
+check 'the hide helper skips a missing path without writing or failing' \
+    "rc=0 hide: no $WORK/no_such_file; skipped node=" \
+    "$(: > "$WORK/susfs_path"; out="$(noemulator_hide "$WORK/no_such_file")"
+       echo "rc=$? $out node=$(cat "$WORK/susfs_path")")"
 
 check 'delprop emits a resetprop delete' \
     '/data/adb/ksu/bin/resetprop -d ro.boot.qemu' \
@@ -84,7 +99,7 @@ check 'a setprop value keeps its spaces' \
 
 printf '# a comment\n\n   \n  hide /dev/x  \n' > "$WORK/mixed"
 check 'comments, blank lines and whitespace-only lines are skipped, and a directive may be indented' \
-    "echo 'add /dev/x' > /proc/susfs_path" \
+    "noemulator_hide '/dev/x'" \
     "$(sh "$GENERATE" "$WORK/mixed")"
 
 : > "$WORK/empty"
@@ -130,7 +145,18 @@ check 'the shipped artifacts.conf is valid' '0' "$?"
 # process, so ENOENT makes EGL init fail and libEGL dereferences the NULL extension
 # string. Isolated to these rules alone, twice. A regression guard, not a style check.
 check 'the shipped config hides no goldfish device node' '0' \
-    "$(sh "$GENERATE" "$REPO/module/artifacts.conf" | grep -c "^echo 'add /dev/goldfish")"
+    "$(sh "$GENERATE" "$REPO/module/artifacts.conf" | grep -c "^noemulator_hide '/dev/goldfish")"
+
+# Detectors list /vendor/lib64/hw and score each 'ranchu' name (ADR 0030). None of
+# these five is opened by an app, which is what makes hiding them safe; a sixth
+# name needs that measured first, as docs/research/spike-hal-listing.md did.
+check 'the shipped config hides exactly the five ranchu HAL files' \
+    "noemulator_hide '/vendor/lib64/hw/android.hardware.audio.legacy@7.1-impl.ranchu.so'
+noemulator_hide '/vendor/lib64/hw/android.hardware.audio@7.1-impl.ranchu.so'
+noemulator_hide '/vendor/lib64/hw/android.hardware.sensors@2.1-impl.ranchu.so'
+noemulator_hide '/vendor/lib64/hw/mapper.ranchu.so'
+noemulator_hide '/vendor/lib64/hw/vulkan.ranchu.so'" \
+    "$(sh "$GENERATE" "$REPO/module/artifacts.conf" | grep "^noemulator_hide '/vendor/lib64/hw/")"
 
 # Deleting the property before zygote is what stops the bridge loading; hiding the
 # library instead left /proc/self/maps and dl_iterate_phdr disagreeing.
@@ -216,8 +242,14 @@ check_invariant 1 'the only token-prefixed value is the real Pixel 8 system-part
 # property written on its own line, so the two can only agree by being kept in
 # step. Hardcoding both sides would assert nothing.
 
+# Every preset is checked, not only the default: a dump-built preset is as able
+# to disagree with itself as a hand-kept one (ADR 0034).
+for identity_preset in $(cd "$REPO/module/devices" && ls *.conf | sed 's/\.conf$//'); do
+printf 'device %s\n' "$identity_preset" > "$WORK/identity.conf"
+identity_rules="$(NOEMULATOR_ANDROID_RELEASE=16 sh "$GENERATE" "$REPO/module/artifacts.conf" "$WORK/identity.conf")"
+
 shipped_prop() {
-    sh "$GENERATE" "$REPO/module/artifacts.conf" \
+    printf '%s\n' "$identity_rules" \
         | sed -n "s|^/data/adb/ksu/bin/resetprop $1 '\(.*\)'$|\1|p"
 }
 
@@ -235,32 +267,32 @@ fingerprint_build_id="${fingerprint_rest%%/*}"
 fingerprint_rest="${fingerprint_rest#*/}"
 fingerprint_incremental="${fingerprint_rest%%:*}"
 
-check 'ro.product.device matches the device in the fingerprint' \
+check "ro.product.device matches the device in the fingerprint ($identity_preset)" \
     "$fingerprint_device" "$(shipped_prop 'ro\.product\.device')"
 
 # init's deprecated alias for ro.product.device. Letting it keep the AVD's value
 # would leave Build.PRODUCT reading emu64xa next to a Pixel 8 fingerprint.
-check 'ro.build.product matches the product in the fingerprint' \
+check "ro.build.product matches the product in the fingerprint ($identity_preset)" \
     "$fingerprint_product" "$(shipped_prop 'ro\.build\.product')"
 
-check 'ro.build.id matches the build in the fingerprint' \
+check "ro.build.id matches the build in the fingerprint ($identity_preset)" \
     "$fingerprint_build_id" "$(shipped_prop 'ro\.build\.id')"
 
 # What Settings shows and what the WebView and HTTP user agents print after
 # 'Build/'. A stale value here is visible to any page the device loads.
-check 'ro.build.display.id matches the build in the fingerprint' \
+check "ro.build.display.id matches the build in the fingerprint ($identity_preset)" \
     "$fingerprint_build_id" "$(shipped_prop 'ro\.build\.display\.id')"
 
-check 'ro.build.version.incremental matches the fingerprint' \
+check "ro.build.version.incremental matches the fingerprint ($identity_preset)" \
     "$fingerprint_incremental" "$(shipped_prop 'ro\.build\.version\.incremental')"
 
 # A real device builds both of these out of the same fields, so they are the
 # cheapest place for a hand-edited fingerprint to leave a contradiction.
-check 'ro.build.description restates the fingerprint' \
+check "ro.build.description restates the fingerprint ($identity_preset)" \
     "$fingerprint_product-user $fingerprint_release $fingerprint_build_id $fingerprint_incremental release-keys" \
     "$(shipped_prop 'ro\.build\.description')"
 
-check 'ro.build.flavor restates the fingerprint' \
+check "ro.build.flavor restates the fingerprint ($identity_preset)" \
     "$fingerprint_product-user" "$(shipped_prop 'ro\.build\.flavor')"
 
 # Each partition keeps its own copy of the identity. A copy left behind is what
@@ -278,7 +310,7 @@ check 'ro.build.flavor restates the fingerprint' \
 # sort -u means agreement prints one line and any disagreement prints two, so the
 # comparison is against the single expected value.
 device_partition_values() {
-    sh "$GENERATE" "$REPO/module/artifacts.conf" \
+    printf '%s\n' "$identity_rules" \
         | grep -E "^/data/adb/ksu/bin/resetprop ro\.product\.(odm|product|system_dlkm|system_ext|vendor|vendor_dlkm)\.$1 " \
         | sed "s|^.* '\(.*\)'$|\1|" \
         | sort -u
@@ -286,28 +318,28 @@ device_partition_values() {
 
 # Same, for the ro.<partition>.build.<field> spelling, which covers all seven.
 partition_build_values() {
-    sh "$GENERATE" "$REPO/module/artifacts.conf" \
+    printf '%s\n' "$identity_rules" \
         | grep -E "^/data/adb/ksu/bin/resetprop ro\.(odm|product|system|system_dlkm|system_ext|vendor|vendor_dlkm)\.build\.$1 " \
         | sed "s|^.* '\(.*\)'$|\1|" \
         | sort -u
 }
 
 for identity_family in model name device; do
-    check "every device partition's $identity_family equals the base value" \
+    check "every device partition's $identity_family equals the base value ($identity_preset)" \
         "$(shipped_prop "ro\.product\.$identity_family")" \
         "$(device_partition_values "$identity_family")"
 done
 
-check 'every device partition gets model, name and device' '18' \
-    "$(sh "$GENERATE" "$REPO/module/artifacts.conf" \
+check "every device partition gets model, name and device ($identity_preset)" '18' \
+    "$(printf '%s\n' "$identity_rules" \
         | grep -c -E "resetprop ro\.product\.(odm|product|system_dlkm|system_ext|vendor|vendor_dlkm)\.(model|name|device) ")"
 
 # Six of the seven repeat the base fingerprint verbatim. Asserting the set rather
 # than a count also closes a vacuous pass: with every fingerprint line deleted the
 # old "no partition claims a different release" check had nothing to reject.
-check 'every device partition fingerprint equals the base fingerprint' \
+check "every device partition fingerprint equals the base fingerprint ($identity_preset)" \
     "$shipped_fingerprint" \
-    "$(sh "$GENERATE" "$REPO/module/artifacts.conf" \
+    "$(printf '%s\n' "$identity_rules" \
         | grep -E "^/data/adb/ksu/bin/resetprop ro\.(odm|product|system_dlkm|system_ext|vendor|vendor_dlkm)\.build\.fingerprint " \
         | sed "s|^.* '\(.*\)'$|\1|" \
         | sort -u)"
@@ -315,23 +347,30 @@ check 'every device partition fingerprint equals the base fingerprint' \
 # The system partition names the generic image, not the device -- but it must
 # still agree with the base on release, build and incremental, which is where a
 # hand edit would leave it behind.
-check 'the system partition fingerprint names the generic image at the same build' \
-    "google/generic_system_google/generic:$fingerprint_release/$fingerprint_build_id/$fingerprint_incremental:user/release-keys" \
-    "$(shipped_prop 'ro\.system\.build\.fingerprint')"
+# The hand-kept Pixel 8 names the generic image there, as its Android 17 dump
+# does; the Android 16 dumps name the device (docs/research/pixel-device-presets.md).
+# Either way it must agree with the base on release, build and incremental.
+system_fingerprint="$(shipped_prop 'ro\.system\.build\.fingerprint')"
+case "$system_fingerprint" in
+    google/generic_system_google/generic:*) system_expected="google/generic_system_google/generic:$fingerprint_release/$fingerprint_build_id/$fingerprint_incremental:user/release-keys" ;;
+    *) system_expected=$shipped_fingerprint ;;
+esac
+check "the system partition fingerprint names the generic image or the device, at the same build ($identity_preset)" \
+    "$system_expected" "$system_fingerprint"
 
-check 'all seven partitions carry a fingerprint' '7' \
-    "$(sh "$GENERATE" "$REPO/module/artifacts.conf" \
+check "all seven partitions carry a fingerprint ($identity_preset)" '7' \
+    "$(printf '%s\n' "$identity_rules" \
         | grep -c -E "resetprop ro\.[a-z_]+\.build\.fingerprint ")"
 
-check 'every partition build.id equals the base build id' \
+check "every partition build.id equals the base build id ($identity_preset)" \
     "$fingerprint_build_id" "$(partition_build_values 'id')"
 
-check 'every partition incremental equals the base incremental' \
+check "every partition incremental equals the base incremental ($identity_preset)" \
     "$fingerprint_incremental" "$(partition_build_values 'version\.incremental')"
 
 for build_family in id version.incremental; do
-    check "all seven partitions carry a build.$build_family" '7' \
-        "$(sh "$GENERATE" "$REPO/module/artifacts.conf" \
+    check "all seven partitions carry a build.$build_family ($identity_preset)" '7' \
+        "$(printf '%s\n' "$identity_rules" \
             | grep -c -E "resetprop ro\.[a-z_]+\.build\.$build_family ")"
 done
 
@@ -340,18 +379,118 @@ done
 # would make this device disagree with every real one. This check exists to stop
 # a future tidy-up of vdinfos' SPLIT verdict from doing exactly that
 # (docs/adr/0018-mirror-a-real-pixel-8-partition-for-partition.md).
-check 'the system partition keeps the generic image name' 'Generic System' \
+check "the system partition keeps the generic image name ($identity_preset)" 'Generic System' \
     "$(shipped_prop 'ro\.product\.system\.model')"
 
 # A property set twice is ambiguous: the last resetprop wins, silently, and
 # customize.sh reads ro.hardware.vulkan straight out of the config assuming one
 # match. Counting distinct names against total setprop rules catches any
 # duplicate, not only that one.
-check 'no property is set twice' \
-    "$(sh "$GENERATE" "$REPO/module/artifacts.conf" | grep -c 'resetprop [^-]')" \
-    "$(sh "$GENERATE" "$REPO/module/artifacts.conf" \
+check "no property is set twice ($identity_preset)" \
+    "$(printf '%s\n' "$identity_rules" | grep -c 'resetprop [^-]')" \
+    "$(printf '%s\n' "$identity_rules" \
         | sed -n 's|^/data/adb/ksu/bin/resetprop \([^ -][^ ]*\) .*|\1|p' \
         | sort -u | wc -l | tr -d ' ')"
+
+# device_name restates the model, so changing the model without the name would
+# bring back the contradiction issue #28 removed.
+check "device_name equals ro.product.model ($identity_preset)" \
+    "$(shipped_prop 'ro\.product\.model')" \
+    "$(printf '%s\n' "$identity_rules" \
+        | sed -n "s|^noemulator_setting 'global' 'device_name' '\(.*\)'$|\1|p")"
+
+# A preset is applied only on the release it names, so the name has to be the
+# release its fingerprint claims.
+check "the preset's android line is its fingerprint's release ($identity_preset)" \
+    "$fingerprint_release" \
+    "$(sed -n 's/^android //p' "$REPO/module/devices/$identity_preset.conf")"
+
+# customize.sh stages the Vulkan HAL and the EGL driver under the names
+# artifacts.conf gives, before any choice is read. A preset giving another name
+# would point the property at a file nobody staged.
+check "the preset names no Vulkan or EGL variant ($identity_preset)" '0' \
+    "$(grep -c -E '^setprop ro\.(boot\.)?hardware\.(vulkan|egl) ' "$REPO/module/devices/$identity_preset.conf")"
+done
+
+# --- choosing a device preset (issue #133) ----------------------------------
+#
+# The user config's 'device' line replaces the shipped default with another
+# preset. A choice that cannot be applied leaves the default in place and keeps
+# the config valid, because an invalid config applies nothing at all (ADR 0034).
+
+# device_rules <user config> [running release]: the rules, with stderr in
+# $WORK/device.err.
+device_rules() {
+    printf '%s\n' "$1" > "$WORK/device.conf"
+    NOEMULATOR_ANDROID_RELEASE=${2-16} sh "$GENERATE" "$REPO/module/artifacts.conf" "$WORK/device.conf" 2>"$WORK/device.err"
+}
+default_rules="$(sh "$GENERATE" "$REPO/module/artifacts.conf")"
+
+check 'choosing the default preset changes nothing' \
+    "$default_rules" "$(device_rules 'device shiba')"
+
+check 'a chosen preset leaves no value of the default behind' '0 Pixel 8 Pro' \
+    "$(rules="$(device_rules 'device husky')"
+       printf '%s ' "$(printf '%s\n' "$rules" | grep -c -e shiba -e "'Pixel 8'")"
+       printf '%s\n' "$rules" | sed -n "s|^/data/adb/ksu/bin/resetprop ro.product.model '\(.*\)'$|\1|p")"
+
+for unapplied in 'device nosuch|16|has no preset' \
+    'device Bad!|16|is not a preset name' \
+    'device husky
+device caiman|16|is given more than once' \
+    'device husky|17|is for Android 16, and this device runs Android 17' \
+    'device husky||is for Android 16, and this device runs Android unknown'; do
+    unapplied_config=${unapplied%%|*}
+    unapplied_rest=${unapplied#*|}
+    unapplied_release=${unapplied_rest%%|*}
+    unapplied_reason=${unapplied_rest#*|}
+    check "an unapplied choice keeps every default rule and exits 0: $unapplied_reason" \
+        "exit=0 same" \
+        "$(rules="$(device_rules "$unapplied_config" "$unapplied_release")"
+           echo "exit=$? $([ "$rules" = "$default_rules" ] && echo same)")"
+    check "an unapplied choice is named on stderr: $unapplied_reason" '1' \
+        "$(device_rules "$unapplied_config" "$unapplied_release" >/dev/null
+           grep -c -F "$unapplied_reason; the default, shiba, applies" "$WORK/device.err")"
+done
+
+check "a user setprop still wins over the chosen preset's value" 'My Phone' \
+    "$(device_rules 'device husky
+setprop ro.product.model My Phone' \
+        | sed -n "s|^/data/adb/ksu/bin/resetprop ro.product.model '\(.*\)'$|\1|p" | tail -n 1)"
+
+# preset_fixture <shipped list> <preset>: a list with one preset, devices/x.conf.
+preset_fixture() {
+    rm -rf "$WORK/preset"
+    mkdir -p "$WORK/preset/devices"
+    printf '%s\n' "$1" > "$WORK/preset/artifacts.conf"
+    printf '%s\n' "$2" > "$WORK/preset/devices/x.conf"
+    sh "$GENERATE" "$WORK/preset/artifacts.conf" 2>"$WORK/preset.err" >/dev/null
+    preset_exit=$?
+    cat "$WORK/preset.err"
+    echo "exit=$preset_exit"
+}
+
+check 'a preset holding another directive is rejected and names its line' \
+    "$WORK/preset/devices/x.conf:2: a device preset holds only setprop, setting and android lines
+exit=1" \
+    "$(preset_fixture 'device x' 'android 16
+hide /x')"
+
+check "an 'android' line outside a preset is rejected and names its line" \
+    "$WORK/preset/artifacts.conf:1: 'android' belongs in a device preset
+exit=1" \
+    "$(preset_fixture 'android 16' 'android 16')"
+
+check 'a second shipped device line is rejected and names it' \
+    "$WORK/preset/artifacts.conf:2: device is given twice
+exit=1" \
+    "$(preset_fixture 'device x
+device x' 'android 16')"
+
+check 'a shipped device line naming no preset is rejected' \
+    "$WORK/preset/artifacts.conf:1: no preset $WORK/preset/devices/y.conf
+exit=1" \
+    "$(preset_fixture 'device y' 'android 16')"
 
 # Two matching lines would make customize.sh build a filename out of both of them.
 check 'the shipped config sets ro.hardware.vulkan exactly once' '1' \
@@ -416,13 +555,6 @@ done
 # ANGLE is a translation layer: naming a package by default would put an app the
 # user never chose onto a different GL driver. The directive ships unused, as
 # 'hide' does.
-# device_name restates the model, so changing the model without the name would
-# bring back the contradiction issue #28 removed.
-check 'the shipped device_name equals the shipped ro.product.model' \
-    "$(shipped_prop 'ro\.product\.model')" \
-    "$(sh "$GENERATE" "$REPO/module/artifacts.conf" \
-        | sed -n "s|^noemulator_setting 'global' 'device_name' '\(.*\)'$|\1|p")"
-
 check 'the shipped config names no angle package' '0' \
     "$(sh "$GENERATE" "$REPO/module/artifacts.conf" | grep -c '^noemulator_angle ')"
 
@@ -517,18 +649,61 @@ check 'the user config lives under /data/adb/, outside the module directory' 'ye
 native_bridge_deletes='/data/adb/ksu/bin/resetprop -d ro.dalvik.vm.native.bridge
 /data/adb/ksu/bin/resetprop -d ro.enable.native.bridge.exec'
 
+# The name the kept bridge is loaded under, held until both files are read.
+native_bridge_name_call="noemulator_native_bridge_name 'libsysglue.so'"
+
+# The machine a translated arm64 app reads, held the same way.
+uname_machine_call="noemulator_uname_machine 'aarch64' '/system/bin/arm64/linker64'"
+
+# The key an app reads as unset from its own copy of the area, held the same way.
+app_delprop_bridge_call="noemulator_app_delprop 'ro.dalvik.vm.native.bridge'"
+
+# Every app-view key, in the order artifacts.conf lists them: the bridge key, the
+# 13 ABI and isa.* keys, then the two on trial (#108).
+app_delprop_call="$app_delprop_bridge_call
+noemulator_app_delprop 'ro.product.cpu.abi'
+noemulator_app_delprop 'ro.product.cpu.abilist'
+noemulator_app_delprop 'ro.product.cpu.abilist32'
+noemulator_app_delprop 'ro.product.cpu.abilist64'
+noemulator_app_delprop 'ro.system.product.cpu.abilist'
+noemulator_app_delprop 'ro.system.product.cpu.abilist32'
+noemulator_app_delprop 'ro.system.product.cpu.abilist64'
+noemulator_app_delprop 'ro.enable.native.bridge.exec'
+noemulator_app_delprop 'ro.vendor.product.cpu.abilist'
+noemulator_app_delprop 'ro.vendor.product.cpu.abilist32'
+noemulator_app_delprop 'ro.vendor.product.cpu.abilist64'
+noemulator_app_delprop 'ro.dalvik.vm.isa.arm'
+noemulator_app_delprop 'ro.dalvik.vm.isa.arm64'
+noemulator_app_delprop 'dalvik.vm.isa.x86_64.features'
+noemulator_app_delprop 'dalvik.vm.isa.x86_64.variant'"
+
+# The three ELF-header redirects, in the order artifacts.conf lists them. Held
+# until both files are read, so they come after every line emitted as it is read.
+elf_redirects="noemulator_redirect '/system/lib64/libc.so' '/system/lib64/arm64/libc.so' '3' 'app_only keep_ident'
+noemulator_redirect '/system/bin/linker64' '/system/bin/arm64/linker64' '3' 'any_label'
+noemulator_redirect '/system/lib64/libandroid_runtime.so' '/system/lib64/arm64/libandroid_runtime.so' '3'"
+
 check 'without native_bridge keep both native bridge deletes are emitted' '2' \
     "$(sh "$GENERATE" "$REPO/module/artifacts.conf" | grep -cxF "$native_bridge_deletes")"
 
-# Exactly the two deletes go and nothing else changes: ARM translation must not
-# quietly cost another rule.
+# The two deletes go, and the ELF-header redirects arrive at the end. Nothing else
+# changes: ARM translation must not quietly cost another rule.
 check 'native_bridge keep in the user config drops exactly the two native bridge deletes' \
-    "$(sh "$GENERATE" "$REPO/module/artifacts.conf" | grep -vxF "$native_bridge_deletes")" \
+    "$(sh "$GENERATE" "$REPO/module/artifacts.conf" | grep -vxF "$native_bridge_deletes")
+$elf_redirects
+$native_bridge_name_call
+$uname_machine_call
+$app_delprop_call" \
     "$(sh "$GENERATE" "$REPO/module/artifacts.conf" "$(user_config_with 'native_bridge keep')")"
 
 check 'native_bridge keep in the shipped list does the same' \
-    "$(sh "$GENERATE" "$REPO/module/artifacts.conf" | grep -vxF "$native_bridge_deletes")" \
+    "$(sh "$GENERATE" "$REPO/module/artifacts.conf" | grep -vxF "$native_bridge_deletes")
+$elf_redirects
+$native_bridge_name_call
+$uname_machine_call
+$app_delprop_call" \
     "$(cat "$REPO/module/artifacts.conf" > "$WORK/conf"
+       cp -R "$REPO/module/devices" "$WORK/devices"
        echo 'native_bridge keep' >> "$WORK/conf"
        sh "$GENERATE" "$WORK/conf")"
 
@@ -539,6 +714,442 @@ for bad_keep in 'native_bridge hide' 'native_bridge Keep' 'native_bridge keep no
             "$(user_config_with "$bad_keep")" >/dev/null 2>"$WORK/err"
            echo "exit=$? $(grep -c "^$WORK/user.conf:1: ${bad_keep%% *} takes only 'keep'" "$WORK/err")")"
 done
+
+# --- native_bridge_name (issue #89) -------------------------------------------
+
+native_bridge_name_line='native_bridge_name libsysglue.so'
+
+# Without the keep the property is deleted, so a name would have nothing to point
+# at. The directive is held, as the ELF-header redirects are.
+check 'without native_bridge keep the shipped config emits no bridge name' '0' \
+    "$(sh "$GENERATE" "$REPO/module/artifacts.conf" \
+        | grep -c '^noemulator_native_bridge_name ')"
+
+check 'native_bridge keep in the user config emits the shipped bridge name' \
+    "$native_bridge_name_call" \
+    "$(sh "$GENERATE" "$REPO/module/artifacts.conf" "$(user_config_with 'native_bridge keep')" \
+        | grep '^noemulator_native_bridge_name ')"
+
+# The keep may come before or after the directive in the same file: the line is
+# held until both files are read, as the deletes and the redirects are.
+check 'native_bridge keep before the bridge name still emits it' \
+    "$native_bridge_name_call" \
+    "$(sh "$GENERATE" "$(config_with "native_bridge keep
+$native_bridge_name_line")" | grep '^noemulator_native_bridge_name ')"
+
+check 'native_bridge keep after the bridge name still emits it' \
+    "$native_bridge_name_call" \
+    "$(sh "$GENERATE" "$(config_with "$native_bridge_name_line
+native_bridge keep")" | grep '^noemulator_native_bridge_name ')"
+
+# The name reaches a path under /system/lib64 and a command the applier evals.
+# A slash would leave that directory; a quote would break the command.
+for bad_bridge_name in 'a/b.so' 'libx' "lib'x.so"; do
+    check "native_bridge_name rejects '$bad_bridge_name' and names the line" 'exit=1 1' \
+        "$(sh "$GENERATE" "$(config_with "native_bridge_name $bad_bridge_name")" >/dev/null 2>"$WORK/err"
+           echo "exit=$? $(grep -c "^$WORK/conf:1: " "$WORK/err")")"
+done
+
+# One name only. The installer stages one copy, and a second line would point the
+# property at a file that is not there.
+check 'a second native_bridge_name line fails and names it' 'exit=1 1' \
+    "$(sh "$GENERATE" "$(config_with "native_bridge_name libone.so
+native_bridge_name libtwo.so")" >/dev/null 2>"$WORK/err"
+       echo "exit=$? $(grep -c "^$WORK/conf:2: native_bridge_name is given twice" "$WORK/err")")"
+
+# The rename is set before zygote, by the helper post-fs-data defines, and only
+# when the installer staged the file. A property naming a missing library breaks
+# every ARM app.
+check 'post-fs-data defines the bridge name helper' '1' \
+    "$(grep -c '^noemulator_native_bridge_name()' "$REPO/module/post-fs-data.sh")"
+
+check 'the helper checks the staged file before it writes the property' 'before' \
+    "$(helper="$(sed -n '/^noemulator_native_bridge_name()/,/^}/p' "$REPO/module/post-fs-data.sh")"
+       staged_line="$(printf '%s\n' "$helper" | grep -n 'no staged' | cut -d: -f1)"
+       set_line="$(printf '%s\n' "$helper" | grep -n 'resetprop ro.dalvik.vm.native.bridge' | cut -d: -f1)"
+       [ -n "$staged_line" ] && [ -n "$set_line" ] && [ "$staged_line" -lt "$set_line" ] && echo before || echo after)"
+
+check 'post-fs-data does not filter the bridge name line out' '0' \
+    "$(grep -c -- "-e '\^noemulator_native_bridge_name '" "$REPO/module/post-fs-data.sh")"
+
+check 'the installer calls install_native_bridge_copy' '1' \
+    "$(grep -c '^install_native_bridge_copy$' "$REPO/module/customize.sh")"
+
+check 'post-mount does not run the bridge name helper' '0' \
+    "$(grep -c 'noemulator_native_bridge_name' "$REPO/module/post-mount.sh")"
+
+check 'service does not run the bridge name helper' '0' \
+    "$(grep -c 'noemulator_native_bridge_name' "$REPO/module/service.sh")"
+
+# --- uname_machine (issue #87) ------------------------------------------------
+
+uname_machine_line='uname_machine aarch64 /system/bin/arm64/linker64'
+
+# With the property deleted no arm64 app runs, so there is nothing to spoof. The
+# line is held and dropped, as the ELF-header redirects are.
+check 'without native_bridge keep the shipped config emits no uname machine line' '0' \
+    "$(sh "$GENERATE" "$REPO/module/artifacts.conf" \
+        | grep -c '^noemulator_uname_machine ')"
+
+check 'native_bridge keep in the user config emits the shipped uname machine line' \
+    "$uname_machine_call" \
+    "$(sh "$GENERATE" "$REPO/module/artifacts.conf" "$(user_config_with 'native_bridge keep')" \
+        | grep '^noemulator_uname_machine ')"
+
+check 'native_bridge keep before the uname machine line still emits it' \
+    "$uname_machine_call" \
+    "$(sh "$GENERATE" "$(config_with "native_bridge keep
+$uname_machine_line")" | grep '^noemulator_uname_machine ')"
+
+check 'native_bridge keep after the uname machine line still emits it' \
+    "$uname_machine_call" \
+    "$(sh "$GENERATE" "$(config_with "$uname_machine_line
+native_bridge keep")" | grep '^noemulator_uname_machine ')"
+
+# The machine and the marker reach a node line inside a command the applier evals,
+# and the kernel resolves the marker to the file it matches against a process's
+# maps. A machine with a space is three arguments, a quote breaks the command, and
+# a relative or '..' marker names a file this config does not mean. An empty
+# machine leaves one argument.
+for bad_uname_machine in 'uname_machine aa rch /system/bin/arm64/linker64' \
+    "uname_machine a'b /system/bin/arm64/linker64" \
+    'uname_machine /system/bin/arm64/linker64' \
+    'uname_machine aarch64 relative/marker' \
+    'uname_machine aarch64 /a/../b' \
+    "uname_machine aarch64 /system/bin/a'b" \
+    'uname_machine aarch64 /system/bin/arm64/linker64 extra'; do
+    check "'$bad_uname_machine' is rejected and names the line" 'exit=1 1' \
+        "$(printf '# first line\n%s\n' "$bad_uname_machine" > "$WORK/conf"
+           sh "$GENERATE" "$WORK/conf" >/dev/null 2>"$WORK/err"
+           echo "exit=$? $(grep -c "^$WORK/conf:2: " "$WORK/err")")"
+done
+
+check 'uname_machine rejects a machine over 64 characters and names the line' 'exit=1 1' \
+    "$(uname_long_machine="$(printf '%65s' '' | tr ' ' a)"
+       sh "$GENERATE" "$(config_with "uname_machine $uname_long_machine /system/bin/marker")" \
+           >/dev/null 2>"$WORK/err"
+       echo "exit=$? $(grep -c "^$WORK/conf:1: " "$WORK/err")")"
+
+check 'a second uname_machine line fails and names it' 'exit=1 1' \
+    "$(sh "$GENERATE" "$(config_with "$uname_machine_line
+uname_machine aarch64 /system/bin/other")" >/dev/null 2>"$WORK/err"
+       echo "exit=$? $(grep -c "^$WORK/conf:2: uname_machine is given twice" "$WORK/err")")"
+
+# The write runs at post-mount, before the open-redirect guard: it needs neither
+# that node nor the overlay, and a kernel with one susfs feature and not the other
+# must not lose the spoof with the redirects.
+check 'post-mount defines the uname machine helper' '1' \
+    "$(grep -c '^noemulator_uname_machine()' "$REPO/module/post-mount.sh")"
+
+check 'the helper checks the node and the marker before it writes' 'before' \
+    "$(helper="$(sed -n '/^noemulator_uname_machine()/,/^}/p' "$REPO/module/post-mount.sh")"
+       node_line="$(printf '%s\n' "$helper" | grep -n 'SUSFS_UNAME_MACHINE_NODE" \]' | cut -d: -f1)"
+       marker_line="$(printf '%s\n' "$helper" | grep -n -- '-e "\$uname_machine_marker"' | cut -d: -f1)"
+       set_line="$(printf '%s\n' "$helper" | grep -n 'echo "set \$uname_machine_name' | cut -d: -f1)"
+       [ -n "$node_line" ] && [ -n "$marker_line" ] && [ -n "$set_line" ] &&
+           [ "$node_line" -lt "$set_line" ] && [ "$marker_line" -lt "$set_line" ] &&
+           echo before || echo after)"
+
+check 'post-mount applies the uname machine rules before the redirect-node guard' 'before' \
+    "$(uname_rules_line="$(grep -n "grep '\^noemulator_uname_machine '" "$REPO/module/post-mount.sh" | cut -d: -f1)"
+       guard_line="$(grep -n '\[ ! -e "\$SUSFS_REDIRECT_NODE" \]' "$REPO/module/post-mount.sh" | cut -d: -f1)"
+       [ -n "$uname_rules_line" ] && [ -n "$guard_line" ] && [ "$uname_rules_line" -lt "$guard_line" ] &&
+           echo before || echo after)"
+
+check 'post-fs-data applies no uname machine rule' '1' \
+    "$(grep -c -- "-e '\^noemulator_uname_machine '" "$REPO/module/post-fs-data.sh")"
+
+check 'service does not run the uname machine rules' '0' \
+    "$(grep -c 'noemulator_uname_machine' "$REPO/module/service.sh")"
+
+# --- app_delprop (issue #107) -------------------------------------------------
+
+app_delprop_line='app_delprop ro.dalvik.vm.native.bridge needs_native_bridge'
+
+# The ABI and bridge keys are read by an app only while the ARM bridge is kept.
+# Without it the property is deleted above and no app runs under the translator,
+# so their lines are held and dropped, as the uname machine line is. The init
+# service keys are not flagged: those services run whatever the bridge setting
+# (ADR 0032).
+check 'without native_bridge keep the shipped config hides exactly the seven init service keys' \
+    "init.svc.android-hardware-media-c2-goldfish-hal-1-0
+init.svc.qemu-device-state
+init.svc.qemu-props
+init.svc.qemu-props-bootcomplete
+init.svc.ranchu-adb-setup
+init.svc.ranchu-net
+init.svc.ranchu-setup" \
+    "$(sh "$GENERATE" "$REPO/module/artifacts.conf" \
+        | grep '^noemulator_app_delprop ' | cut -d"'" -f2 | sort)"
+
+check 'an app_delprop line without the flag is emitted without native_bridge keep' \
+    "noemulator_app_delprop 'init.svc.ranchu-net'" \
+    "$(sh "$GENERATE" "$(config_with 'app_delprop init.svc.ranchu-net')" | grep '^noemulator_app_delprop ')"
+
+check 'without native_bridge keep a flagged app_delprop line is dropped' '0' \
+    "$(sh "$GENERATE" "$(config_with "$app_delprop_line")" | grep -c '^noemulator_app_delprop ')"
+
+check 'native_bridge keep before the app_delprop line still emits it' \
+    "$app_delprop_bridge_call" \
+    "$(sh "$GENERATE" "$(config_with "native_bridge keep
+$app_delprop_line")" | grep '^noemulator_app_delprop ')"
+
+check 'native_bridge keep after the app_delprop line still emits it' \
+    "$app_delprop_bridge_call" \
+    "$(sh "$GENERATE" "$(config_with "$app_delprop_line
+native_bridge keep")" | grep '^noemulator_app_delprop ')"
+
+# The whole list, once: 14 ABI, isa.* and bridge keys plus the two on trial
+# (#108), which is what keep adds to the seven init service keys. Sorted, so the
+# check reads as the list rather than as the file's order; a key repeated by
+# mistake still shows up as a repeated line.
+check 'native_bridge keep adds exactly the sixteen shipped bridge keys' \
+    "dalvik.vm.isa.x86_64.features
+dalvik.vm.isa.x86_64.variant
+ro.dalvik.vm.isa.arm
+ro.dalvik.vm.isa.arm64
+ro.dalvik.vm.native.bridge
+ro.enable.native.bridge.exec
+ro.product.cpu.abi
+ro.product.cpu.abilist
+ro.product.cpu.abilist32
+ro.product.cpu.abilist64
+ro.system.product.cpu.abilist
+ro.system.product.cpu.abilist32
+ro.system.product.cpu.abilist64
+ro.vendor.product.cpu.abilist
+ro.vendor.product.cpu.abilist32
+ro.vendor.product.cpu.abilist64" \
+    "$(sh "$GENERATE" "$REPO/module/artifacts.conf" "$(user_config_with 'native_bridge keep')" \
+        | grep '^noemulator_app_delprop ' | cut -d"'" -f2 | grep -v '^init\.svc\.' | sort)"
+
+# The key reaches a command the applier evals and a path built from it under
+# /dev/__properties__. A quote breaks out of the quoting, a space makes two
+# arguments, and a semicolon starts a second command.
+for bad_app_delprop in 'app_delprop' "app_delprop a'b" 'app_delprop a b' 'app_delprop a;b' \
+    'app_delprop a needs_native_bridge extra'; do
+    check "'$bad_app_delprop' is rejected and names the line" 'exit=1 1' \
+        "$(printf '# first line\n%s\n' "$bad_app_delprop" > "$WORK/conf"
+           sh "$GENERATE" "$WORK/conf" >/dev/null 2>"$WORK/err"
+           echo "exit=$? $(grep -c "^$WORK/conf:2: " "$WORK/err")")"
+done
+
+# One view per area: a second line for the same key would delete it twice and the
+# log would count it twice.
+check 'the same app_delprop key twice fails and names the second line' 'exit=1 1' \
+    "$(sh "$GENERATE" "$(config_with "$app_delprop_line
+$app_delprop_line")" >/dev/null 2>"$WORK/err"
+       echo "exit=$? $(grep -c "^$WORK/conf:2: app_delprop ro.dalvik.vm.native.bridge is given twice" "$WORK/err")")"
+
+check 'an app_delprop key in both files fails and names the user config line' 'exit=1 1' \
+    "$(sh "$GENERATE" "$(config_with "$app_delprop_line")" \
+        "$(user_config_with "# mine
+$app_delprop_line")" >/dev/null 2>"$WORK/err"
+       echo "exit=$? $(grep -c "^$WORK/user.conf:2: app_delprop ro.dalvik.vm.native.bridge is given twice" "$WORK/err")")"
+
+# The copy is built at post-mount, not post-fs-data: another module's post-fs-data
+# property write may land after this module's, and the copy is frozen. post-fs-data
+# must hand the line on untouched.
+check 'post-fs-data applies no app_delprop rule' '1' \
+    "$(grep -c -- "-e '\^noemulator_app_delprop '" "$REPO/module/post-fs-data.sh")"
+
+check 'post-mount runs the app property view after the redirect-node guard and before the first generic redirect' 'before' \
+    "$(app_view_line="$(grep -n 'noemulator_app_property_view ' "$REPO/module/post-mount.sh" | cut -d: -f1 | head -n 1)"
+       guard_line="$(grep -n '\[ ! -e "\$SUSFS_REDIRECT_NODE" \]' "$REPO/module/post-mount.sh" | cut -d: -f1)"
+       redirect_line="$(grep -n "grep '\^noemulator_redirect '" "$REPO/module/post-mount.sh" | cut -d: -f1)"
+       [ -n "$app_view_line" ] && [ -n "$guard_line" ] && [ -n "$redirect_line" ] &&
+           [ "$guard_line" -lt "$app_view_line" ] && [ "$app_view_line" -lt "$redirect_line" ] &&
+           echo before || echo after)"
+
+# The probe's first attempt bind-mounted into init's namespace and leaked an
+# edited area to every process that opened one for a minute. unshare -m alone keeps
+# shared propagation, so the make-rprivate call has to come before any bind.
+check 'the library makes the namespace private before its first bind mount' 'before' \
+    "$(private_line="$(grep -n 'mount --make-rprivate' "$REPO/module/lib/app_property_view.sh" | cut -d: -f1)"
+       bind_line="$(grep -n -- '--bind' "$REPO/module/lib/app_property_view.sh" | cut -d: -f1)"
+       [ -n "$private_line" ] && [ -n "$bind_line" ] && [ "$private_line" -lt "$bind_line" ] &&
+           echo before || echo after)"
+
+# Without the hide an app finds the view by name: the directory answers EACCES
+# where a missing path answers ENOENT, and a copy opens by its path (#107).
+check 'the library hides the copy directory from apps' '1' \
+    "$(grep -c 'echo "add $prop_view_dir" > "$NOEMULATOR_PROP_VIEW_HIDE_NODE"' "$REPO/module/lib/app_property_view.sh")"
+
+# -n keeps the property service out of the edit. Without it the copy would be
+# announced, and a rebuild without -n would reach every reader.
+check 'every resetprop call in the library carries -n' '0' \
+    "$(grep 'prop_view_resetprop ' "$REPO/module/lib/app_property_view.sh" \
+        | grep -vc -- ' -n ')"
+
+# The area allowlist, run for real against stubs. getprop -Z answers from one
+# '<key> <context>' line, and both /proc nodes are plain files, so what the
+# library writes can be read back. A view of an area an app cannot read is itself
+# visible (ADR 0029), so the key has to be refused, not copied.
+PROP_VIEW_BIN="$WORK/prop-view-bin"
+mkdir -p "$PROP_VIEW_BIN"
+cat > "$PROP_VIEW_BIN/getprop" <<'STUB'
+#!/bin/sh
+# getprop -Z <key>: the key's context; nothing for a bare listing.
+[ "${1:-}" = -Z ] && [ -n "${2:-}" ] || exit 0
+grep -F "$2 " "$PROP_VIEW_ANSWERS" 2>/dev/null | cut -d' ' -f2
+STUB
+chmod +x "$PROP_VIEW_BIN/getprop"
+
+# run_prop_view <key> <context, or nothing>: the library's log, then the bytes
+# written to each node file and whether a copy directory was left behind.
+run_prop_view() {
+    rm -rf "$WORK/prop-view"
+    mkdir -p "$WORK/prop-view"
+    : > "$WORK/prop-view/node"
+    : > "$WORK/prop-view/redirect-node"
+    : > "$WORK/prop-view/hide-node"
+    printf '%s %s\n' "$1" "$2" > "$WORK/prop-view/answers"
+    printf "noemulator_app_delprop '%s'\n" "$1" > "$WORK/prop-view/rules"
+    PATH="$PROP_VIEW_BIN:$PATH" PROP_VIEW_ANSWERS="$WORK/prop-view/answers" \
+        sh -c ". '$REPO/module/lib/app_property_view.sh'
+               NOEMULATOR_PROP_VIEW_DIR='$WORK/prop-view/copies'
+               NOEMULATOR_PROP_VIEW_NODE='$WORK/prop-view/node'
+               NOEMULATOR_PROP_VIEW_REDIRECT_NODE='$WORK/prop-view/redirect-node'
+               NOEMULATOR_PROP_VIEW_HIDE_NODE='$WORK/prop-view/hide-node'
+               noemulator_app_property_view '$WORK/prop-view/rules'"
+    echo "node=$(wc -c < "$WORK/prop-view/node" | tr -d ' ') redirect=$(wc -c < "$WORK/prop-view/redirect-node" | tr -d ' ')"
+    [ -s "$WORK/prop-view/hide-node" ] && echo "hide=$(cat "$WORK/prop-view/hide-node")"
+    [ -e "$WORK/prop-view/copies" ] && echo 'copy dir left'
+    return 0
+}
+
+check 'the library refuses a key in an area apps cannot read' \
+    "app property view: ro.odm.product.cpu.abilist is in vendor_default_prop, which apps cannot be given a view of; skipped
+node=0 redirect=0" \
+    "$(run_prop_view ro.odm.product.cpu.abilist u:object_r:vendor_default_prop:s0)"
+
+check 'the library refuses a key getprop -Z answers with nothing' \
+    "app property view: dalvik.vm.isa.x86_64.variant is in no context, which apps cannot be given a view of; skipped
+node=0 redirect=0" \
+    "$(run_prop_view dalvik.vm.isa.x86_64.variant '')"
+
+# Six of the seven emulator services start after post-mount, so a copy of their
+# area built there would freeze states that have not happened yet (ADR 0032).
+# Nothing is registered for it; the directory its copy goes into is made and
+# hidden, so the service.sh refresh has somewhere to build.
+check 'post-mount defers a live area and only hides the view directory' \
+    "app property view: init_service_status_private_prop: built once boot is up
+node=0 redirect=0
+hide=add $WORK/prop-view/copies
+copy dir left" \
+    "$(run_prop_view init.svc.ranchu-net u:object_r:init_service_status_private_prop:s0)"
+
+# uninstall.sh deletes no copy: ksud removes the module before its stage scripts
+# run, so only a copy on tmpfs is gone after uninstall and reboot (#109).
+check 'the app property view copies live on the /dev tmpfs' '1' \
+    "$(grep -c '^NOEMULATOR_PROP_VIEW_DIR=/dev/' "$REPO/module/lib/app_property_view.sh")"
+
+# The copies are frozen at post-mount, and another module's service.sh may write
+# an area after that. Service is the last stage after boot, so the refresh runs
+# there, once the late deletions are in the copies and before the card is flagged.
+check 'service refreshes the app property view after the delprop_once_set wait and before module_status' 'before' \
+    "$(refresh_line="$(grep -n 'noemulator_app_property_view_refresh ' "$REPO/module/service.sh" | cut -d: -f1 | head -n 1)"
+       wait_line="$(grep -n 'delprop_once_set done' "$REPO/module/service.sh" | cut -d: -f1 | head -n 1)"
+       status_line="$(grep -n 'module_status.sh' "$REPO/module/service.sh" | cut -d: -f1 | head -n 1)"
+       [ -n "$refresh_line" ] && [ -n "$wait_line" ] && [ -n "$status_line" ] &&
+           [ "$wait_line" -lt "$refresh_line" ] && [ "$refresh_line" -lt "$status_line" ] &&
+           echo before || echo after)"
+
+# run_prop_view_refresh <node contents>: the library's refresh log, the writes
+# the node received and whether a staging directory was left. No view directory
+# means post-mount set up no view, so nothing at all is written.
+run_prop_view_refresh() {
+    rm -rf "$WORK/prop-view-refresh"
+    mkdir -p "$WORK/prop-view-refresh"
+    printf '%s' "$1" > "$WORK/prop-view-refresh/node"
+    : > "$WORK/prop-view-refresh/redirect-node"
+    : > "$WORK/prop-view-refresh/rules"
+    PATH="$PROP_VIEW_BIN:$PATH" PROP_VIEW_ANSWERS=/dev/null \
+        sh -c ". '$REPO/module/lib/app_property_view.sh'
+               NOEMULATOR_PROP_VIEW_DIR='$WORK/prop-view-refresh/copies'
+               NOEMULATOR_PROP_VIEW_NODE='$WORK/prop-view-refresh/node'
+               NOEMULATOR_PROP_VIEW_REDIRECT_NODE='$WORK/prop-view-refresh/redirect-node'
+               noemulator_app_property_view_refresh '$WORK/prop-view-refresh/rules'"
+    echo "writes=$(grep -c -e '^add ' -e '^clear' "$WORK/prop-view-refresh/node")"
+    [ -e "$WORK/prop-view-refresh/copies" ] && echo 'copy dir left'
+    return 0
+}
+
+check 'the refresh skips when post-mount left no view directory and writes nothing' \
+    "app property view refresh: post-mount set up no view; skipped
+writes=0" \
+    "$(run_prop_view_refresh 'swapped: 0
+failed: 0
+')"
+
+# run_prop_view_watch <live copy: yes or no> <sums, one per pass>: what the
+# watcher rebuilt. The area checksum and the refresh are replaced: one reads the
+# device's property area and the other needs root and a mount namespace, and
+# what is under test is when the loop rebuilds and when it stops. The stand-in
+# refresh records the sum it built from, as the real one does, and the rules file
+# is removed after the last sum, which is how an uninstall ends the loop.
+run_prop_view_watch() {
+    rm -rf "$WORK/prop-view-watch"
+    mkdir -p "$WORK/prop-view-watch/copies"
+    : > "$WORK/prop-view-watch/rules"
+    [ "$1" = yes ] && : > "$WORK/prop-view-watch/copies/init_service_status_private_prop"
+    printf '%s\n' "$2" > "$WORK/prop-view-watch/sums"
+    echo s0 > "$WORK/prop-view-watch/copies/.live_sum"
+    sh -c ". '$REPO/module/lib/app_property_view.sh'
+           NOEMULATOR_PROP_VIEW_DIR='$WORK/prop-view-watch/copies'
+           NOEMULATOR_PROP_VIEW_WATCH_INTERVAL=0
+           noemulator_prop_view_live_sum() {
+               sum=\$(head -n 1 '$WORK/prop-view-watch/sums')
+               sed -i 1d '$WORK/prop-view-watch/sums'
+               [ -s '$WORK/prop-view-watch/sums' ] || rm -f '$WORK/prop-view-watch/rules'
+               echo \"\$sum\" > '$WORK/prop-view-watch/last'
+               echo \"\$sum\"
+           }
+           noemulator_app_property_view_refresh() {
+               echo \"rebuilt from \$(cat '$WORK/prop-view-watch/last')\"
+               cp '$WORK/prop-view-watch/last' '$WORK/prop-view-watch/copies/.live_sum'
+           }
+           noemulator_app_property_view_watch '$WORK/prop-view-watch/rules'"
+    return 0
+}
+
+check 'the watcher rebuilds only on a pass whose live area changed, and stops once the rules are gone' \
+    "app property view: a live area changed; rebuilding
+rebuilt from s1
+app property view: a live area changed; rebuilding
+rebuilt from s2" \
+    "$(run_prop_view_watch yes 's0
+s1
+s1
+s2
+s2')"
+
+check 'the watcher starts no loop when no live area has a copy' '' \
+    "$(run_prop_view_watch no 's1')"
+
+# An app that takes its uid between the clear and an area's add gets the real
+# area, and the watcher rebuilds again and again. Every prop view add comes
+# straight after the clear, before any redirect is rewritten (12 ms against
+# 109 ms on the reference AVD). Both nodes are the same pipe here, so the order
+# of the writes can be read; a regular file would be truncated by each write.
+check 'the refresh re-adds every prop view entry before it rewrites any redirect' \
+    "clear
+add build_prop
+add init_service_status_private_prop
+del build_prop
+add_open_redirect build_prop
+del init_service_status_private_prop
+add_open_redirect init_service_status_private_prop" \
+    "$(rm -rf "$WORK/prop-view-order"
+       mkdir -p "$WORK/prop-view-order/copies"
+       : > "$WORK/prop-view-order/copies/build_prop"
+       : > "$WORK/prop-view-order/copies/init_service_status_private_prop"
+       sh -c ". '$REPO/module/lib/app_property_view.sh'
+              NOEMULATOR_PROP_VIEW_NODE=/dev/stdout
+              NOEMULATOR_PROP_VIEW_REDIRECT_NODE=/dev/stdout
+              prop_view_dir='$WORK/prop-view-order/copies'
+              noemulator_prop_view_replace" | cat |
+           sed 's|^\([a-z_]*\) /dev/__properties__/u:object_r:\([a-z_]*\):s0.*|\1 \2|')"
 
 # Regression, 2026-10-20: KernelSU ran this module's post-fs-data before
 # susfs_lkm_x64's, so every early rule was skipped. The loader must be asked
@@ -561,6 +1172,56 @@ for bad_kstat in 'kstat_inode /data/local/tmp' 'kstat_inode data/local/tmp 1234'
         "$(sh "$GENERATE" "$(config_with "$bad_kstat")" >/dev/null 2>"$WORK/err"
            echo "exit=$? $(grep -c "^$WORK/conf:1: " "$WORK/err")")"
 done
+
+# --- relabel (issue #123) -----------------------------------------------------
+
+check 'relabel emits a call to the post-fs-data helper' \
+    "noemulator_relabel '/sys/devices/platform/GFSH0001:00/power_supply' 'u:object_r:sysfs:s0'" \
+    "$(sh "$GENERATE" "$(config_with 'relabel /sys/devices/platform/GFSH0001:00/power_supply u:object_r:sysfs:s0')")"
+
+# Both fields are quoted into the emitted line, so a quote in either is an injection.
+for bad_relabel in 'relabel /sys/x' 'relabel sys/x u:object_r:sysfs:s0' \
+    "relabel /sys/x';reboot u:object_r:sysfs:s0" 'relabel /sys/x sysfs' \
+    "relabel /sys/x u:object_r:sys'fs:s0" 'relabel /sys/x u:r:sysfs:s0' \
+    'relabel /sys/x u:object_r:sysfs:s0 extra'; do
+    check "'$bad_relabel' is rejected and names its line" 'exit=1 1' \
+        "$(sh "$GENERATE" "$(config_with "$bad_relabel")" >/dev/null 2>"$WORK/err"
+           echo "exit=$? $(grep -c "^$WORK/conf:1: " "$WORK/err")")"
+done
+
+# The helper is run with chcon and toybox stat replaced at the boundary: the host
+# has no SELinux. The fake chcon records the label, the fake stat reads it back,
+# unless the run sets a label that does not take.
+eval "$(sed -n '/^noemulator_relabel()/,/^}/p' "$REPO/module/post-fs-data.sh")"
+chcon() { [ -n "${relabel_ignored:-}" ] || printf '%s' "$1" > "$WORK/label"; }
+printf '#!/bin/sh\ncat %s\n' "$WORK/label" > "$WORK/fake_toybox"
+chmod +x "$WORK/fake_toybox"
+# Read by the helper evaled above, which is why nothing in this file references it.
+# shellcheck disable=SC2034
+NOEMULATOR_STAT="$WORK/fake_toybox"
+mkdir -p "$WORK/power_supply"
+
+check 'the relabel helper succeeds when the label reads back' 'rc=0' \
+    "$(printf 'u:object_r:sysfs_batteryinfo:s0' > "$WORK/label"
+       noemulator_relabel "$WORK/power_supply" u:object_r:sysfs:s0 >/dev/null; echo "rc=$?")"
+
+# A chcon that returns 0 while the label stays is a rule that did nothing; it must
+# be a failed rule, or the artifact stays with health reading ok.
+check 'the relabel helper fails when the label does not read back' 'rc=1' \
+    "$(printf 'u:object_r:sysfs_batteryinfo:s0' > "$WORK/label"
+       relabel_ignored=1 noemulator_relabel "$WORK/power_supply" u:object_r:sysfs:s0 >/dev/null; echo "rc=$?")"
+
+check 'the relabel helper skips a missing path without calling chcon' \
+    "rc=0 relabel: no $WORK/no_such_dir; skipped label=unchanged" \
+    "$(printf unchanged > "$WORK/label"
+       out="$(noemulator_relabel "$WORK/no_such_dir" u:object_r:sysfs:s0)"
+       echo "rc=$? $out label=$(cat "$WORK/label")")"
+
+# ADR 0031. Only the parent: battery and its files keep sysfs_batteryinfo, so apps
+# still cannot read the battery, as on a real phone.
+check 'the shipped config relabels only the AVD power_supply directory, to sysfs' \
+    "noemulator_relabel '/sys/devices/platform/GFSH0001:00/power_supply' 'u:object_r:sysfs:s0'" \
+    "$(sh "$GENERATE" "$REPO/module/artifacts.conf" | grep '^noemulator_relabel ')"
 
 # Applied by post-fs-data with the property rules, before zygote: a later stage
 # would let an app started earlier read the real inode.
@@ -627,6 +1288,78 @@ check 'redirect without a uid_scheme exits non-zero' '1' "$?"
 sh "$GENERATE" "$(config_with 'redirect /dev/a /dev/b 5')" >/dev/null 2>&1
 check 'redirect with an out-of-range uid_scheme exits non-zero' '1' "$?"
 
+# Without the bridge the arm64 copies mean nothing, so the three lines are
+# dropped rather than applied.
+check 'without native_bridge keep the shipped config emits no ELF header redirect' '' \
+    "$(sh "$GENERATE" "$REPO/module/artifacts.conf" \
+        | grep -e '/system/lib64/arm64/' -e '/system/bin/arm64/')"
+
+# With the bridge kept, all three appear, with the flags the applier acts on and
+# without needs_native_bridge, which the generator consumes. The filter is on the
+# redirect prefix, because the uname machine line now names the same arm64 linker.
+check 'native_bridge keep emits all three ELF header redirects with their flags' \
+    "$elf_redirects" \
+    "$(sh "$GENERATE" "$REPO/module/artifacts.conf" "$(user_config_with 'native_bridge keep')" \
+        | grep -e "^noemulator_redirect '.*/system/lib64/arm64/" \
+            -e "^noemulator_redirect '.*/system/bin/arm64/")"
+
+elf_libc_redirect='redirect /system/lib64/libc.so /system/lib64/arm64/libc.so 3 app_only needs_native_bridge'
+
+# The keep may come before or after the rule in the same file: the line is held
+# until both files are read, as the deletes are.
+check 'native_bridge keep before the ELF redirect still emits it' '1' \
+    "$(sh "$GENERATE" "$(config_with "native_bridge keep
+$elf_libc_redirect")" | grep -c '/system/lib64/arm64/libc.so')"
+
+check 'native_bridge keep after the ELF redirect still emits it' '1' \
+    "$(sh "$GENERATE" "$(config_with "$elf_libc_redirect
+native_bridge keep")" | grep -c '/system/lib64/arm64/libc.so')"
+
+check 'an unknown redirect flag fails and names its line' 'exit=1 1' \
+    "$(sh "$GENERATE" "$(config_with 'redirect /dev/a /dev/b 2 sideways')" >/dev/null 2>"$WORK/err"
+       echo "exit=$? $(grep -c "^$WORK/conf:1: unknown redirect flag 'sideways'" "$WORK/err")")"
+
+check 'a repeated redirect flag fails and names its line' 'exit=1 1' \
+    "$(sh "$GENERATE" "$(config_with 'redirect /dev/a /dev/b 2 any_label any_label')" >/dev/null 2>"$WORK/err"
+       echo "exit=$? $(grep -c "^$WORK/conf:1: redirect flag 'any_label' is given twice" "$WORK/err")")"
+
+# The applier is run with the susfs node replaced at the boundary. A plain file
+# stands in for a build that takes every flag; a fake write that refuses any line
+# carrying keep_ident stands in for a build older than the flag (issue #130). The
+# label match needs SELinux, which the host lacks, so it is stubbed to pass.
+eval "$(sed -n -e '/^noemulator_redirect_write()/,/^}/p' -e '/^noemulator_redirect()/,/^}/p' \
+    "$REPO/module/post-mount.sh")"
+noemulator_labels_match() { return 0; }
+: > "$WORK/redirect_target"
+: > "$WORK/redirect_replacement"
+# Read by the helpers evaled above, which is why nothing in this file references it.
+# shellcheck disable=SC2034
+SUSFS_REDIRECT_NODE="$WORK/redirect_node"
+keep_ident_rule="add_open_redirect $WORK/redirect_target $WORK/redirect_replacement 3 no_reverse app_only"
+
+check 'a susfs build with keep_ident gets the rule with the flag' "$keep_ident_rule keep_ident" \
+    "$(noemulator_redirect "$WORK/redirect_target" "$WORK/redirect_replacement" 3 'app_only keep_ident' >/dev/null
+       cat "$WORK/redirect_node")"
+
+# The WebUI status counts applied redirects by this one line format. A keep_ident
+# rule logged in another shape was applied but not counted (found on the AVD).
+check 'a keep_ident rule logs the applied line the status counts' '1' \
+    "$(noemulator_redirect "$WORK/redirect_target" "$WORK/redirect_replacement" 3 'app_only keep_ident' \
+        | grep -c '^redirect: .* -> .* (scheme [0-4])$')"
+
+check 'a susfs build without keep_ident gets the rule without it, and the log says so' \
+    "$keep_ident_rule
+1" \
+    "$(noemulator_redirect_write() {
+           case "$1" in *keep_ident*) return 1 ;; esac
+           echo "$1" >> "$WORK/accepted"
+       }
+       : > "$WORK/accepted"
+       noemulator_redirect "$WORK/redirect_target" "$WORK/redirect_replacement" 3 'app_only keep_ident' \
+           > "$WORK/apply_log"
+       cat "$WORK/accepted"
+       grep -c "susfs has no keep_ident; $WORK/redirect_target is written without it" "$WORK/apply_log")"
+
 # A replacement carrying a token would rename one hit into another: the detector
 # greps the whole path for 'goldfish', 'ranchu' and 'qemu'.
 check_invariant 1 'no shipped redirect replaces a path with another emulator token' '0' \
@@ -637,11 +1370,13 @@ check_invariant 1 'no shipped redirect replaces a path with another emulator tok
 # customize.sh stages a library replacement by reading the same redirect lines the
 # generator reads. If its expression stops matching, the file is never staged,
 # post-fs-data skips the rule, and the artifact stays visible with nothing failing.
-# The shipped expression is run here against the shipped config.
-# c absorbs the uid_scheme so it does not land in b.
+# The generator is run with native_bridge keep so it emits every line; otherwise
+# the held ELF-header lines would be missing on this side only. The shipped
+# expression is run here against the shipped config.
+# c absorbs the uid_scheme and the flags so they do not land in b.
 # shellcheck disable=SC2034
 check_invariant 1 'customize.sh sees the same redirect lines the generator does' \
-    "$(sh "$GENERATE" "$REPO/module/artifacts.conf" \
+    "$(sh "$GENERATE" "$REPO/module/artifacts.conf" "$(user_config_with 'native_bridge keep')" \
         | sed -n "s/^noemulator_redirect '\\([^']*\\)' '\\([^']*\\)'.*/\\1 \\2/p")" \
     "$(eval "$(grep -m1 "^[[:space:]]*sed -n 's/\\^\\[\\[:space:\\]\\]\\*redirect" "$REPO/module/customize.sh" | cut -d'>' -f1)" \
         | while read -r a b c; do echo "$a $b"; done)"
@@ -688,12 +1423,23 @@ for staging_function in install_vulkan_hal install_redirect_libraries; do
         "$(sed -n "/^$staging_function()/,/^}/p" "$REPO/module/customize.sh" | grep -c 'set_perm')"
 done
 
+# A replacement already on the image is left alone. The ELF-header rules point at
+# the real arm64 libraries, and staging the x86_64 target over one would replace
+# the very file the rule serves (ADR 0026). One the installed NoEmulator delivers
+# (mapper.zuma.so) is staged again, or an update would drop it at the reboot.
+check 'install_redirect_libraries skips a replacement the image carries' '1' \
+    "$(sed -n '/^install_redirect_libraries()/,/^}/p' "$REPO/module/customize.sh" \
+        | grep -c '\[ -e "\$redirect_replacement" \]')"
+check 'install_redirect_libraries restages a replacement the installed module delivers' '1' \
+    "$(sed -n '/^install_redirect_libraries()/,/^}/p' "$REPO/module/customize.sh" \
+        | grep -c '\[ ! -e "/data/adb/modules/noemulator\$redirect_replacement" \]')"
+
 check_invariant 4 'post-mount refuses a replacement whose label differs from the target' '1' \
     "$(grep -c 'noemulator_labels_match "$redirect_target" "$redirect_replacement"' "$REPO/module/post-mount.sh")"
 
 # busybox stat has no %C and prints the literal letter C. Every stat in the
 # module must name toybox explicitly; one that does not is the v0.4.0 boot loop.
-for stat_user in customize.sh post-mount.sh; do
+for stat_user in customize.sh post-fs-data.sh post-mount.sh; do
     check_invariant 4 "$stat_user calls stat only through the toybox path" '0' \
         "$(grep 'stat -c' "$REPO/module/$stat_user" | grep -vc 'NOEMULATOR_STAT')"
 done
@@ -1756,6 +2502,7 @@ check 'options: status reports the last boot only, counting applied redirects al
 susfs yes
 nomount yes
 redirects 2
+view_areas
 stage post-fs-data done
 stage post-mount done
 stage after-wifi done
@@ -1794,6 +2541,47 @@ detail The susfs kernel module is not loaded.
 detail 1 rule(s) failed.' \
     "$(options health)"
 
+# The init service states' copy is first built by the service.sh refresh, not at
+# post-mount (ADR 0032), so the refresh's line names that area. An area both
+# stages name is listed once.
+webui_fixture
+options_fixture
+cat >> "$WORK/opt/module/apply.log" <<'LOG'
+app property view: init_service_status_private_prop: built once boot is up
+app property view: build_prop: 4 key(s) hidden from apps
+app property view: init_service_status_private_prop: copy refreshed
+app property view: build_prop: copy refreshed
+LOG
+check 'options: status lists an area first built once boot is up, and each area once' \
+    'view_areas build_prop init_service_status_private_prop' "$(options status | grep '^view_areas')"
+
+# The app property view (#109): the areas it covers are counted from the last
+# boot like redirects, and a failed area is named, not only counted.
+webui_fixture
+options_fixture
+cat >> "$WORK/opt/module/apply.log" <<'LOG'
+app property view: build_prop: 4 key(s) hidden from apps
+app property view: dalvik_config_prop: 4 key(s) hidden from apps
+delprop_once_set done uptime=13.8
+LOG
+check 'options: status lists the areas the app property view covers' \
+    'view_areas build_prop dalvik_config_prop' "$(options status | grep '^view_areas')"
+check 'options: health is ok with the view working and says which areas it covers' \
+    'health ok
+detail Every stage ran on the last boot, 2 redirects applied, app property view on build_prop dalvik_config_prop.' \
+    "$(options health)"
+
+echo 'failed: app property view: default_prop: open redirect refused' >> "$WORK/opt/module/apply.log"
+check 'options: health names a failed app property view area' \
+    'health warn
+detail 1 rule(s) failed.
+detail App property view: default_prop: open redirect refused.' \
+    "$(options health)"
+
+webui_fixture
+options_fixture
+echo 'failed: resetprop -d ro.other' >> "$WORK/opt/module/apply.log"
+rm "$WORK/opt/susfs_path"
 check 'options: failures lists the last boot failed lines only' \
     'failed: resetprop -d ro.other' "$(options failures)"
 
@@ -1899,7 +2687,8 @@ check 'options: an unknown arm argument exits 2' '2' \
 options_fixture
 options arm on
 check 'options: the arm switch line drops the native bridge deletes' '0' \
-    "$(sh "$GENERATE" "$REPO/module/artifacts.conf" "$WORK/opt/user.conf" | grep -c 'native.bridge')"
+    "$(sh "$GENERATE" "$REPO/module/artifacts.conf" "$WORK/opt/user.conf" \
+        | grep -c -- '-d ro.dalvik.vm.native.bridge$')"
 
 # --- the host clipboard switch (issue #76) --------------------------------------
 
@@ -1941,6 +2730,75 @@ check 'webui: with no user config nothing is ours' '' "$(webui selection)"
 webui add com.example.third
 check 'webui: add with no user config creates it with that one line' \
     'angle com.example.third' "$(cat "$WORK/webui.conf")"
+
+# --- the device dropdown (issue #133) ----------------------------------------
+
+# device_fixture <running release>: the options fixture with the shipped presets,
+# booted with the Pixel 8 and no device chosen.
+device_fixture() {
+    options_fixture
+    rm -f "$WORK/opt/user.conf"
+    printf 'device shiba\n' > "$WORK/opt/module/artifacts.conf"
+    cp -R "$REPO/module/devices" "$WORK/opt/module/devices"
+    printf '%s' "$1" > "$WORK/opt/props/ro.build.version.release"
+    sed -n 's/^setprop ro.build.fingerprint //p' "$REPO/module/devices/shiba.conf" \
+        > "$WORK/opt/props/ro.build.fingerprint"
+}
+
+device_fixture 16
+check 'options: device lists the presets for the running release, with the default configured' \
+    'configured shiba
+running shiba
+preset caiman Pixel 9 Pro
+preset cheetah Pixel 7 Pro
+preset husky Pixel 8 Pro
+preset komodo Pixel 9 Pro XL
+preset shiba Pixel 8' \
+    "$(options device)"
+
+options device husky
+check 'options: choosing a preset writes its line and reads configured, still running the default' \
+    'device husky
+configured husky
+running shiba' \
+    "$(cat "$WORK/opt/user.conf"; options device | grep -v '^preset ')"
+
+printf '# mine\nangle com.example\n' > "$WORK/opt/user.conf"
+cp "$WORK/opt/user.conf" "$WORK/device-before.conf"
+options device komodo
+options device shiba
+check 'options: choosing a preset then the default round-trips the user config byte for byte' 'identical' \
+    "$(cmp -s "$WORK/device-before.conf" "$WORK/opt/user.conf" && echo identical)"
+
+printf '  device caiman\n\tdevice\tkomodo\n' > "$WORK/opt/user.conf"
+options device husky
+check 'options: a choice replaces every device line, however a hand edit spaced it' \
+    'device husky' "$(cat "$WORK/opt/user.conf")"
+
+for refused_device in 'nosuch|1' 'a;b|2' 'Husky|2'; do
+    device_fixture 16
+    options device "${refused_device%|*}" >/dev/null 2>&1
+    check "options: device '${refused_device%|*}' is refused and writes nothing" \
+        "exit=${refused_device#*|} none" \
+        "exit=$? $([ -e "$WORK/opt/user.conf" ] && echo written || echo none)"
+done
+
+device_fixture 17
+options device husky >/dev/null 2>&1
+check 'options: on another Android release no preset is listed, and none can be chosen' \
+    'exit=1 configured shiba
+running shiba' \
+    "exit=$? $(options device)"
+
+device_fixture 16
+cat >> "$WORK/opt/module/apply.log" <<'LOG'
+device: 'husky' is for Android 16, and this device runs Android 17; the default, shiba, applies
+device: 'husky' is for Android 16, and this device runs Android 17; the default, shiba, applies
+LOG
+check 'options: health warns once about a device choice that was not applied' \
+    "health warn
+detail The chosen device was not applied: 'husky' is for Android 16, and this device runs Android 17; the default, shiba, applies." \
+    "$(options health | grep -e '^health' -e 'device')"
 
 # --- carrying choices over at install (issue #61) -------------------------------
 

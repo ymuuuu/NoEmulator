@@ -144,6 +144,17 @@ code { font-family: ui-monospace, monospace; font-size: 0.92em; }
 .switch-row .reboot-note { margin-top: 6px; color: var(--md-primary); font-weight: 500; }
 .switch-row .reboot-note[hidden] { display: none; }
 
+.device-select {
+    flex: none;
+    max-width: 50%;
+    padding: 8px 12px;
+    border: 1px solid var(--md-outline);
+    border-radius: var(--corner-inner);
+    background: var(--md-surface-container-high);
+    color: var(--md-on-surface);
+    font: inherit;
+}
+
 .switch {
     appearance: none;
     -webkit-appearance: none;

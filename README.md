@@ -21,19 +21,26 @@ a raw syscall and the two disagree. Detectors run that comparison today.
 NoEmulator ships rules instead. The kernel answers both paths identically, so there
 is nothing to compare. Nothing on disk is edited, so there is no edit mark to find.
 
-- **Build identity:** the build properties name a Pixel 8 coherently: fingerprint,
-  device, build id and every partition's copy agree.
-- **Emulator properties:** deleted, or given a Pixel 8 value.
+- **Build identity:** the build properties name one Pixel coherently: fingerprint,
+  device, build id and every partition's copy agree. The Pixel 8 by default; pick the
+  Pixel 7 Pro, 8 Pro, 9 Pro or 9 Pro XL under **Phone to claim** in the WebUI's Options
+  tab, or with a `device <codename>` line in the user config.
+- **Emulator properties:** deleted, or given a Pixel value. The emulator's service
+  states are hidden from apps alone.
+- **Emulator-named HAL files** in `/vendor/lib64/hw`: hidden from apps.
+- **Battery directory:** relabelled as on a phone, so apps find `power_supply`.
 - **Emulator device nodes and the gralloc mapper:** redirected to neutral names, so an
   app's file descriptors and memory map carry no `goldfish` or `ranchu`. The device is
   the same, so graphics keep working.
 - **GPU driver names:** the Vulkan and EGL drivers are presented under the name `mali`.
-- **The ARM native bridge:** removed by default, so ARM-only apps break unless you keep
-  it ([LIMITATIONS.md](LIMITATIONS.md)).
+- **The ARM native bridge:** removed by default, so ARM-only apps break unless you turn
+  on **Run ARM apps**. With it on, apps see the bridge's property and ABI keys hidden,
+  arm64 apps read `aarch64` from `uname()`, and the bridge is loaded as `libsysglue.so`
+  ([LIMITATIONS.md](LIMITATIONS.md)).
 
 ## Requirements
 
-- **[susfs4ksu-lkm-x64](https://github.com/ymuuuu/susfs4ksu-lkm-x64) v0.0.7 or later installed and loaded.** NoEmulator does not bundle it and refuses to install without it. 
+- **[susfs4ksu-lkm-x64](https://github.com/ymuuuu/susfs4ksu-lkm-x64) v0.0.8 or later installed and loaded.** NoEmulator does not bundle it and refuses to install without it. On v0.0.7 it installs with a warning, and the rules that need v0.0.8 are skipped: the app-only property hiding, the `uname()` answer and the `libc.so` header redirect.
 - **x86_64.** The install aborts on other architectures.
 - **KernelSU-Next**, which loads the susfs kernel module.
 - **[NoMount](https://github.com/maxsteeel/nomount), recommended.**

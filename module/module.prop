@@ -1,7 +1,7 @@
 id=noemulator
 name=NoEmulator
-version=v0.7.0
-versionCode=22
+version=v0.8.0
+versionCode=23
 author=ymuu
 description=Hides Android emulator artifacts from apps using SUSFS kernel rules. Requires susfs4ksu-lkm-x64. x86_64 only.
 updateJson=https://raw.githubusercontent.com/ymuuuu/NoEmulator/main/update.json

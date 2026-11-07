@@ -48,6 +48,64 @@ RULES="$(sh "$MODDIR/lib/generate_rules.sh" "$MODDIR/artifacts.conf" "$NOEMULATO
     exit 1
 }
 
+# Point the kept native bridge at the name the installer staged.
+#
+# Zygote loads the file ro.dalvik.vm.native.bridge names, and every app's
+# /proc/self/maps carries that name, so the stock name is an artifact. The name is
+# set only when the copy is in this module: a property naming a file that does not
+# exist makes every ARM app fail to start. This runs here rather than later
+# because zygote reads the property once, at start.
+noemulator_native_bridge_name() {
+    bridge_name_file="$1"
+    bridge_name_staged="$MODDIR/system/lib64/$bridge_name_file"
+
+    if [ ! -e "$bridge_name_staged" ]; then
+        echo "native bridge: no staged $bridge_name_file; the name is left as it is"
+        return 0
+    fi
+
+    /data/adb/ksu/bin/resetprop ro.dalvik.vm.native.bridge "$bridge_name_file"
+}
+
+# Hide a path from the apps KernelSU umounts modules for. A path this image does
+# not have is skipped, not failed: there is nothing to hide, and the node refuses
+# the write. The node's verb is 'add', not the CLI's 'add_sus_path'
+# (susfs4ksu-lkm-x64 PROC_INTERFACES.en.md, /proc/susfs_path). The CLI spelling
+# returns EINVAL, which cost a boot to find.
+noemulator_hide() {
+    hide_path="$1"
+
+    if [ ! -e "$hide_path" ]; then
+        echo "hide: no $hide_path; skipped"
+        return 0
+    fi
+
+    echo "add $hide_path" > /proc/susfs_path
+}
+
+# stat is called as toybox explicitly. busybox stat has no %C and prints the
+# literal letter 'C', which is what left the v0.4.0 nodes mislabelled.
+NOEMULATOR_STAT=/system/bin/toybox
+
+# Set one SELinux label on one path. A path this image does not have is skipped,
+# as for hide. The label is read back, because a chcon that reports success on a
+# path whose label did not change would leave the artifact with nothing failing.
+noemulator_relabel() {
+    relabel_path="$1"
+    relabel_context="$2"
+
+    if [ ! -e "$relabel_path" ]; then
+        echo "relabel: no $relabel_path; skipped"
+        return 0
+    fi
+
+    chcon "$relabel_context" "$relabel_path" || return 1
+    relabel_now=$("$NOEMULATOR_STAT" stat -c '%C' "$relabel_path" 2>/dev/null)
+    [ "$relabel_now" = "$relabel_context" ] && return 0
+    echo "relabel: $relabel_path reads '$relabel_now', not $relabel_context"
+    return 1
+}
+
 # Each rule logs its own failure rather than aborting the run: a device node that
 # is absent on this image should not stop the property rules being applied.
 #
@@ -57,6 +115,7 @@ RULES="$(sh "$MODDIR/lib/generate_rules.sh" "$MODDIR/artifacts.conf" "$NOEMULATO
 # post-mount the overlay is up and zygote still does not exist.
 echo "$RULES" | grep -v -e '^noemulator_redirect ' -e '^noemulator_angle ' \
     -e '^noemulator_delprop_after_wifi ' -e '^noemulator_delprop_once_set ' \
+    -e '^noemulator_uname_machine ' -e '^noemulator_app_delprop ' \
     -e '^noemulator_setting ' | while IFS= read -r rule; do
     [ -n "$rule" ] || continue
     eval "$rule" || echo "failed: $rule"

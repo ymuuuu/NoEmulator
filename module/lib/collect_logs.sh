@@ -68,6 +68,11 @@ noemulator_logs_report() {
     noemulator_logs_section 'susfs redirects'
     cat /proc/susfs_open_redirect 2>&1
 
+    # The app property view's rules and its swapped and failed counters. A swap
+    # that fails inside an app is counted here and nowhere in apply.log.
+    noemulator_logs_section 'susfs prop view'
+    cat /proc/susfs_prop_view 2>&1
+
     noemulator_logs_section 'emulator properties still set'
     getprop | grep -iE 'qemu|goldfish|ranchu|emulator|native\.bridge|ro\.hardware' || echo '(none)'
 }

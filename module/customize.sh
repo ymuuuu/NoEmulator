@@ -99,6 +99,33 @@ install_vulkan_hal() {
     ui_print "- Vulkan HAL ${vulkan_source##*/} installed as $vulkan_target"
 }
 
+# Present the kept ARM native bridge under the name artifacts.conf claims.
+#
+# Zygote loads the library ro.dalvik.vm.native.bridge names, and every app maps it,
+# so the stock name is an artifact in /proc/self/maps. The name is read back out of
+# artifacts.conf rather than written here as well, so the property and the file
+# cannot drift.
+#
+# The copy is staged whether or not `native_bridge keep` is set now: the user can
+# turn ARM apps on later in the WebUI, and that must not need a reinstall. An image
+# without the bridge still installs; the rename is then skipped, and post-fs-data
+# leaves the property alone because the staged copy is absent.
+install_native_bridge_copy() {
+    bridge_name=$(sed -n 's/^[[:space:]]*native_bridge_name[[:space:]][[:space:]]*//p' "$MODPATH/artifacts.conf")
+    [ -n "$bridge_name" ] || return 0
+
+    bridge_source=/system/lib64/libndk_translation.so
+    if [ ! -f "$bridge_source" ]; then
+        ui_print "- No $bridge_source on this image; native bridge rename skipped"
+        return 0
+    fi
+
+    noemulator_stage_file "$bridge_source" \
+        "$(noemulator_overlay_path "/system/lib64/$bridge_name")"
+
+    ui_print "- Native bridge ${bridge_source##*/} installed as $bridge_name"
+}
+
 # Present the EGL driver under the name artifacts.conf claims.
 #
 # libEGL.so opens libEGL_<value>.so, libGLESv1_CM_<value>.so and
@@ -140,6 +167,12 @@ install_egl_driver() {
 # written, or the rule is skipped. Copying it here, through the module's overlay,
 # is what makes it exist.
 #
+# A replacement the image itself carries is left alone. The ELF-header rules point
+# at the image's real arm64 libraries, and copying the x86_64 target over one would
+# replace the file the rule exists to serve (ADR 0026). A replacement the installed
+# NoEmulator delivers also exists during an update, and is staged again: the old
+# module's copy goes away at the reboot.
+#
 # The pairs are read out of artifacts.conf for the same reason the Vulkan variant
 # is: the name is written once, and a rule and its file cannot disagree.
 # The lines are read from a file rather than straight off a pipe: a pipeline runs
@@ -149,7 +182,7 @@ install_redirect_libraries() {
     redirect_lines="$TMPDIR/noemulator_redirect_lines"
     sed -n 's/^[[:space:]]*redirect[[:space:]][[:space:]]*//p' "$MODPATH/artifacts.conf" > "$redirect_lines"
 
-    # redirect_rest absorbs the uid_scheme and anything after it, so a line with
+    # redirect_rest absorbs the uid_scheme and the flags after it, so a line with
     # trailing fields does not spill them into redirect_replacement.
     # shellcheck disable=SC2034
     while read -r redirect_target redirect_replacement redirect_rest; do
@@ -157,6 +190,11 @@ install_redirect_libraries() {
             /vendor/lib*/*|/system/lib*/*) ;;
             *) continue ;;
         esac
+        if [ -e "$redirect_replacement" ] &&
+            [ ! -e "/data/adb/modules/noemulator$redirect_replacement" ]; then
+            ui_print "- ${redirect_replacement##*/} is already on the image; not staged"
+            continue
+        fi
         [ -f "$redirect_target" ] || {
             ui_print "- No $redirect_target on this image; its redirect will be skipped"
             continue
@@ -196,6 +234,19 @@ if [ -f "$NOEMULATOR_SUSFS_PROP" ] &&
     ui_print "  Update it, or turn \"Umount modules\" off for each detector app."
 fi
 
+# v0.0.8 added the app_only open-redirect flag. The libc.so ELF-header redirect
+# needs it: without it, a program an app executes gets the arm64 libc and fails to
+# link. Only that rule is skipped, so this warns rather than aborts. The user
+# config is read later in the install, so the warning does not test for
+# 'native_bridge keep' (ADR 0026).
+if [ -f "$NOEMULATOR_SUSFS_PROP" ] &&
+    [ "$(grep_prop versionCode "$NOEMULATOR_SUSFS_PROP")" -lt 8 ] 2>/dev/null; then
+    ui_print "! susfs4ksu-lkm-x64 $(grep_prop version "$NOEMULATOR_SUSFS_PROP") is older than v0.0.8."
+    ui_print "  The libc.so header redirect needs app_only and will be skipped."
+    ui_print "  The uname machine spoof needs that same build's uname_machine node."
+    ui_print "  Hiding properties from apps alone needs its prop_view node."
+fi
+
 # NoMount delivers a module's files by redirecting paths, so nothing NoEmulator
 # installs appears in an app's mount table. KernelSU's own delivery mounts them, and a
 # visible module mount is scored (ADR 0014). A warning, not an abort: the rules work
@@ -209,9 +260,9 @@ else
     ui_print "  See the README."
 fi
 
-ui_print "- Known limits: uname still reports x86_64, root is not hidden, and"
-ui_print "  ARM-only apps lose their native libraries unless you keep the native"
-ui_print "  bridge. See the README."
+ui_print "- Known limits: x86_64 apps still read x86_64 from uname, root is not"
+ui_print "  hidden, and ARM-only apps lose their native libraries unless you keep"
+ui_print "  the native bridge. See the README."
 
 # Choices an older version saved inside the module would be lost with the file
 # this install replaces; move them to the user config first (spec #59).
@@ -232,6 +283,7 @@ set_perm "$MODPATH/lib/generate_rules.sh" 0 0 0755
 
 : > "$NOEMULATOR_STAGED_LABELS"
 install_vulkan_hal
+install_native_bridge_copy
 install_egl_driver
 install_redirect_libraries
 noemulator_apply_staged_labels

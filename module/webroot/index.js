@@ -384,6 +384,7 @@ async function loadHome() {
         infoRow('susfs kernel module', status.susfs === 'yes' ? 'Loaded' : 'Not loaded', status.susfs !== 'yes'),
         infoRow('NoMount', status.nomount === 'yes' ? 'Active' : 'Not active', status.nomount !== 'yes'),
         infoRow('Redirects applied', status.redirects || '0'),
+        infoRow('App property view', status.view_areas ? status.view_areas.split(' ').join(', ') : 'Off'),
     );
     document.getElementById('home-boot').replaceChildren(
         ...status.stages.map((stage) =>
@@ -440,6 +441,48 @@ async function loadSwitch(name) {
     updateRebootButton();
 }
 
+// The device preset works like a switch with more than two positions: the
+// helper reports the configured and the running preset, and lists the presets
+// for this Android version.
+const deviceSelect = document.getElementById('device-select');
+const deviceReboot = document.getElementById('device-reboot');
+
+async function loadDevice() {
+    const result = await exec(`${OPTIONS_HELPER} device`);
+    if (result.errno !== 0) {
+        optionsStatus.textContent = `Could not read the device: ${result.stderr.trim() || `exit ${result.errno}`}`;
+        return;
+    }
+    let configured = '';
+    let running = '';
+    deviceSelect.replaceChildren();
+    for (const line of lines(result.stdout)) {
+        const [key, codename, ...model] = line.split(' ');
+        if (key === 'configured') configured = codename;
+        else if (key === 'running') running = codename;
+        else if (key === 'preset') deviceSelect.add(new Option(model.join(' '), codename));
+    }
+    deviceSelect.value = configured;
+    deviceReboot.hidden = configured === running;
+    deviceSelect.disabled = false;
+    updateRebootButton();
+}
+
+deviceSelect.addEventListener('change', async () => {
+    const wanted = deviceSelect.value;
+    deviceSelect.disabled = true;
+    const result = await exec(`${OPTIONS_HELPER} device ${wanted}`);
+    if (result.errno !== 0) {
+        const reason = result.stderr.trim() || `exit ${result.errno}`;
+        optionsStatus.textContent = `Could not change it: ${reason}`;
+        toast(reason);
+    } else {
+        const model = deviceSelect.selectedOptions[0].textContent;
+        optionsStatus.textContent = `Saved. This device claims to be a ${model} after the next reboot.`;
+    }
+    await loadDevice();
+});
+
 // --- reboot ------------------------------------------------------------------
 
 // Shown while any switch says "Reboot to apply". Like Adopt, it arms on the first
@@ -450,7 +493,8 @@ const rebootLabel = document.getElementById('reboot-label');
 let rebootArmed = false;
 
 function updateRebootButton() {
-    rebootButton.hidden = Object.values(SWITCHES).every((sw) => sw.reboot.hidden);
+    rebootButton.hidden = deviceReboot.hidden &&
+        Object.values(SWITCHES).every((sw) => sw.reboot.hidden);
     if (rebootButton.hidden) disarmReboot();
 }
 
@@ -477,6 +521,7 @@ rebootButton.addEventListener('click', async () => {
 });
 
 async function loadOptions() {
+    await loadDevice();
     for (const name of Object.keys(SWITCHES)) await loadSwitch(name);
 }
 

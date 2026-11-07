@@ -94,6 +94,22 @@
   <section id="view-options" class="view" aria-labelledby="options-title">
     <h1 id="options-title" class="page-title">Options</h1>
 
+    <h3 class="group-label">Device</h3>
+    <div class="group">
+      <label class="row switch-row" for="device-select">
+        <span>
+          <strong>Phone to claim</strong>
+          <small>
+            The Pixel whose fingerprint, model and build every app reads. Only
+            phones with a build for this Android version are listed. Takes effect
+            after a reboot.
+          </small>
+          <small class="reboot-note" id="device-reboot" hidden>Reboot to apply</small>
+        </span>
+        <select class="device-select" id="device-select" disabled></select>
+      </label>
+    </div>
+
     <h3 class="group-label">Compatibility</h3>
     <div class="group">
       <label class="row switch-row">

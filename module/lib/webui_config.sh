@@ -43,3 +43,26 @@ noemulator_webui_drop_line() {
     done < "$NOEMULATOR_USER_CONFIG"
     mv "$webui_config_rewritten" "$NOEMULATOR_USER_CONFIG"
 }
+
+# Drop every line holding <directive>, however it is indented: a hand-edited
+# config may space it differently from what the WebUI writes.
+noemulator_webui_drop_directive() {
+    [ -e "$NOEMULATOR_USER_CONFIG" ] || return 0
+    webui_config_tab=$(printf '\t')
+    webui_config_rewritten="$NOEMULATOR_USER_CONFIG.webui"
+    : > "$webui_config_rewritten"
+    while IFS= read -r webui_config_line || [ -n "$webui_config_line" ]; do
+        webui_config_trimmed=$webui_config_line
+        while :; do
+            case $webui_config_trimmed in
+                ' '*|"$webui_config_tab"*) webui_config_trimmed=${webui_config_trimmed#?} ;;
+                *) break ;;
+            esac
+        done
+        case "$webui_config_trimmed" in
+            "$1 "*|"$1$webui_config_tab"*) continue ;;
+        esac
+        printf '%s\n' "$webui_config_line" >> "$webui_config_rewritten"
+    done < "$NOEMULATOR_USER_CONFIG"
+    mv "$webui_config_rewritten" "$NOEMULATOR_USER_CONFIG"
+}
