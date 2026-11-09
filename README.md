@@ -1,5 +1,16 @@
 # NoEmulator
 
+<p align="center">
+  <a href="https://github.com/ymuuuu/NoEmulator/releases/latest"><img src="https://img.shields.io/github/v/release/ymuuuu/NoEmulator?style=flat&color=0969DA" alt="Latest release" /></a>
+  <a href="https://github.com/ymuuuu/NoEmulator/releases"><img src="https://img.shields.io/github/downloads/ymuuuu/NoEmulator/total?style=flat&color=8957E5" alt="Total downloads across all releases" /></a>
+  <a href="https://github.com/ymuuuu/NoEmulator/stargazers"><img src="https://img.shields.io/github/stars/ymuuuu/NoEmulator?style=flat&label=%E2%98%85&color=E3B341" alt="GitHub stars" /></a>
+  <img src="https://img.shields.io/badge/license-GPL--3.0-F0883E?style=flat" alt="License: GPL-3.0" />
+  <img src="https://img.shields.io/badge/Android%20x86__64%20emulator-3DDC84?style=flat&logo=android&logoColor=white" alt="Platform: Android x86_64 emulator" />
+  <a href="https://t.me/ymuulabs"><img src="https://img.shields.io/badge/Telegram-26A5E4?style=flat&logo=telegram&logoColor=white" alt="Telegram channel" /></a>
+  <a href="https://x.com/ymuuu_"><img src="https://img.shields.io/badge/X-000000?style=flat&logo=x&logoColor=white" alt="Follow on X" /></a>
+  <a href="https://paypal.me/ymuu"><img src="https://img.shields.io/badge/PayPal-003087?style=flat&logo=paypal&logoColor=white" alt="Support me on PayPal" /></a>
+</p>
+
 Hides Android emulator artifacts from apps, using kernel rules rather than hooks.
 
 **Status: early, but measured end to end.** Tested on one reference device, a rooted
